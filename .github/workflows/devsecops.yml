@@ -1,0 +1,75 @@
+
+name: devsecops
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep (SAST)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep \
+            semgrep scan --config p/javascript --config p/dockerfile --error
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gitleaks (secrets)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest dir /repo -v
+
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - name: npm audit (SCA)
+        run: npm audit --omit=dev --audit-level=high
+
+  iac:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkov (Dockerfile)
+        run: |
+          docker run --rm -v "$PWD:/src" bridgecrew/checkov \
+            -d /src --framework dockerfile --compact
+
+  image:
+    needs: [build-test, sast, secrets, sca, iac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t tp-notes:${{ github.sha }} .
+      - name: Trivy security gate
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --exit-code 1 --ignore-unfixed \
+            --severity HIGH,CRITICAL tp-notes:${{ github.sha }}
+      - name: Generate image SBOM
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/out" aquasec/trivy:latest image \
+            --format cyclonedx -o /out/sbom-image.cdx.json \
+            tp-notes:${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-image.cdx.json
